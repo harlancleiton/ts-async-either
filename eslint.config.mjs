@@ -19,5 +19,10 @@ export default [
   {
     ignores: ['node_modules', 'dist'],
   },
+  {
+    rules: {
+      '@typescript-eslint/ban-ts-comment': 'off',
+    },
+  },
   prettier,
 ];
