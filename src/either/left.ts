@@ -56,6 +56,29 @@ export class Left<L, R> extends Either<L, R> {
   public unwrapError(): L {
     return this.error;
   }
+
+  public tap(): Either<L, R> {
+    return this;
+  }
+
+  public tapError(fn: (error: L) => void): Either<L, R> {
+    try {
+      fn(this.error);
+    } catch (error) {
+      console.log('[Either/Left] Error on tapError');
+      console.error(error);
+    }
+
+    return this;
+  }
+
+  public tapBoth(
+    rightFn: ((value: R) => void) | null,
+    leftFn: ((error: L) => void) | null,
+  ): Either<L, R> {
+    if (leftFn) return this.tapError(leftFn);
+    return this;
+  }
 }
 
 export const left = <L, R>(error: L): Either<L, R> => new Left<L, R>(error);

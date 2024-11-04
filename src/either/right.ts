@@ -65,6 +65,26 @@ export class Right<L, R> extends Either<L, R> {
   public unwrapOrThrow(): R {
     return this.value;
   }
+
+  public tap(fn: (value: R) => void): Either<L, R> {
+    try {
+      fn(this.value);
+    } catch (error) {
+      console.log('[Either/Right] Error on tap');
+      console.error(error);
+    }
+
+    return this;
+  }
+
+  public tapError(): Either<L, R> {
+    return this;
+  }
+
+  public tapBoth(rightFn: ((value: R) => void) | null): Either<L, R> {
+    if (rightFn) return this.tap(rightFn);
+    return this;
+  }
 }
 
 export const right = <L, R>(value: R): Either<L, R> => new Right<L, R>(value);

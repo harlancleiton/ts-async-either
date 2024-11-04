@@ -31,4 +31,13 @@ export abstract class Either<L, R> {
   public abstract unwrap(): R;
 
   public abstract unwrapError(): L;
+
+  public abstract tap(fn: (value: R) => void): Either<L, R>;
+
+  public abstract tapError(fn: (error: L) => void): Either<L, R>;
+
+  public abstract tapBoth(
+    rightFn: (value: R) => void | null,
+    leftFn: (error: L) => void | null,
+  ): Either<L, R>;
 }
