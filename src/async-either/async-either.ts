@@ -81,6 +81,20 @@ export class AsyncEither<L, R> implements Promise<Either<L, R>> {
     return new AsyncEither(newPromise);
   }
 
+  public recover<U>(fn: (left: Either<L, R>) => AsyncEither<L | U, R>) {
+    const newPromise = this.promise.then(async (either) => {
+      if (either.isRight()) return right<L, R>(either.unwrap());
+
+      const result = await fn(either);
+      if (result instanceof AsyncEither) {
+        return result.then((e) => e);
+      }
+      return result;
+    });
+
+    return new AsyncEither(newPromise);
+  }
+
   public filter<E, S extends R>(
     predicate: (value: R) => value is S,
     errorFactory: (value: R) => E,
@@ -138,10 +152,7 @@ export class AsyncEither<L, R> implements Promise<Either<L, R>> {
         try {
           await fn(either.unwrap());
         } catch (error) {
-          console.log(
-            '🚀 ~ AsyncEither<L, ~ this.promise.then ~ error:',
-            error,
-          );
+          console.error('An error occurred at tap', error);
         }
         return either;
       }),
@@ -155,10 +166,7 @@ export class AsyncEither<L, R> implements Promise<Either<L, R>> {
         try {
           await fn(either.unwrapError());
         } catch (error) {
-          console.error(
-            '🚀 ~ AsyncEither<L, ~ this.promise.then ~ error:',
-            error,
-          );
+          console.error('An error occurred at tapError', error);
         }
         return either;
       }),
@@ -166,29 +174,15 @@ export class AsyncEither<L, R> implements Promise<Either<L, R>> {
   }
 
   public tapBoth(
-    rightFn: (value: R) => void | Promise<void> | null,
-    leftFn: (error: L) => void | Promise<void> | null,
+    rightFn: ((value: R) => void | Promise<void>) | null,
+    leftFn: ((error: L) => void | Promise<void>) | null,
   ): AsyncEither<L, R> {
     return new AsyncEither(
       this.promise.then(async (either) => {
         if (either.isRight() && !!rightFn) {
-          try {
-            await rightFn(either.unwrap());
-          } catch (error) {
-            console.log(
-              '🚀 ~ AsyncEither<L, ~ this.promise.then ~ error:',
-              error,
-            );
-          }
+          await this.tap(rightFn);
         } else if (either.isLeft() && !!leftFn) {
-          try {
-            await leftFn(either.unwrapError());
-          } catch (error) {
-            console.error(
-              '🚀 ~ AsyncEither<L, ~ this.promise.then ~ error:',
-              error,
-            );
-          }
+          await this.tapError(leftFn);
         }
 
         return either;
