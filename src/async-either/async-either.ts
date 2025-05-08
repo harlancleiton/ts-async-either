@@ -189,10 +189,8 @@ export class AsyncEither<L, R> implements Promise<Either<L, R>> {
   public async toResult(): Promise<
     { success: true; value: R } | { success: false; error: L }
   > {
-    const either = await this.promise;
-    return either.isRight()
-      ? { success: true, value: either.unwrap() }
-      : { success: false, error: either.unwrapError() };
+    const eitherInstance = await this.promise;
+    return eitherInstance.toResult();
   }
 
   private chain<NextL, NextR>(

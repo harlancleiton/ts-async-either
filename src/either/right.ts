@@ -85,6 +85,10 @@ export class Right<L, R> extends Either<L, R> {
     if (rightFn) return this.tap(rightFn);
     return this;
   }
+
+  public toResult(): { success: true; value: R } {
+    return { success: true, value: this.value };
+  }
 }
 
 export const right = <L, R>(value: R): Either<L, R> => new Right<L, R>(value);

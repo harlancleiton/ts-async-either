@@ -40,4 +40,8 @@ export abstract class Either<L, R> {
     rightFn: (value: R) => void | null,
     leftFn: (error: L) => void | null,
   ): Either<L, R>;
+
+  public abstract toResult():
+    | { success: true; value: R }
+    | { success: false; error: L };
 }

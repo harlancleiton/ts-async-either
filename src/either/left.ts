@@ -79,6 +79,10 @@ export class Left<L, R> extends Either<L, R> {
     if (leftFn) return this.tapError(leftFn);
     return this;
   }
+
+  public toResult(): { success: false; error: L } {
+    return { success: false, error: this.error };
+  }
 }
 
 export const left = <L, R>(error: L): Either<L, R> => new Left<L, R>(error);
