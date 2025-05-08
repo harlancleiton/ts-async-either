@@ -46,53 +46,45 @@ export class AsyncEither<L, R> implements Promise<Either<L, R>> {
   }
 
   public map<T>(fn: (value: R) => T | Promise<T>): AsyncEither<L, T> {
-    const newPromise = this.promise.then(async (either) => {
+    return this.chain(async (either) => {
       if (either.isLeft()) return left<L, T>(either.unwrapError());
       const mappedValue = await fn(either.unwrap());
       return right<L, T>(mappedValue);
     });
-
-    return new AsyncEither(newPromise);
   }
 
   public flatMap<U, T>(
     fn: (value: R) => Either<U, T> | Promise<Either<U, T>> | AsyncEither<U, T>,
   ): AsyncEither<L | U, T> {
-    const newPromise = this.promise.then(async (either) => {
+    return this.chain(async (either) => {
       if (either.isLeft()) return left<L | U, T>(either.unwrapError());
 
       const result = await fn(either.unwrap());
       if (result instanceof AsyncEither) {
-        return result.then((e) => e);
+        return result.promise;
       }
       return result;
     });
-
-    return new AsyncEither(newPromise);
   }
 
   public mapError<U>(fn: (error: L) => U | Promise<U>): AsyncEither<U, R> {
-    const newPromise = this.promise.then(async (either) => {
+    return this.chain(async (either) => {
       if (either.isRight()) return right<U, R>(either.unwrap());
       const mappedError = await fn(either.unwrapError());
       return left<U, R>(mappedError);
     });
-
-    return new AsyncEither(newPromise);
   }
 
   public recover<U>(fn: (left: Either<L, R>) => AsyncEither<L | U, R>) {
-    const newPromise = this.promise.then(async (either) => {
-      if (either.isRight()) return right<L, R>(either.unwrap());
+    return this.chain(async (either) => {
+      if (either.isRight()) return right<L | U, R>(either.unwrap());
 
       const result = await fn(either);
       if (result instanceof AsyncEither) {
-        return result.then((e) => e);
+        return result.promise;
       }
       return result;
     });
-
-    return new AsyncEither(newPromise);
   }
 
   public filter<E, S extends R>(
@@ -111,20 +103,18 @@ export class AsyncEither<L, R> implements Promise<Either<L, R>> {
       | ((value: R) => boolean | Promise<boolean>),
     errorFactory: (value: R) => E,
   ): AsyncEither<L | E, R | S> {
-    return new AsyncEither(
-      this.promise.then(async (either) => {
-        if (either.isLeft()) {
-          return left<L | E, R | S>(either.unwrapError());
-        }
+    return this.chain(async (either) => {
+      if (either.isLeft()) {
+        return left<L | E, R | S>(either.unwrapError());
+      }
 
-        const value = either.unwrap();
-        const predicateResult = await predicate(value);
+      const value = either.unwrap();
+      const predicateResult = await predicate(value);
 
-        return predicateResult
-          ? right<L | E, R | S>(value)
-          : left<L | E, R | S>(errorFactory(value));
-      }),
-    );
+      return predicateResult
+        ? right<L | E, R | S>(value)
+        : left<L | E, R | S>(errorFactory(value));
+    });
   }
 
   public async getOrElse(defaultValue: R | (() => Promise<R> | R)): Promise<R> {
@@ -146,36 +136,32 @@ export class AsyncEither<L, R> implements Promise<Either<L, R>> {
   }
 
   public tap(fn: (value: R) => void | Promise<void>): AsyncEither<L, R> {
-    return new AsyncEither(
-      this.promise.then(async (either) => {
-        if (!either.isRight()) return either;
-        try {
-          await fn(either.unwrap());
-        } catch (error) {
-          console.error('An error occurred at tap', error);
-        }
-        return either;
-      }),
-    );
+    return this.chain(async (either) => {
+      if (!either.isRight()) return either;
+      try {
+        await fn(either.unwrap());
+      } catch (error) {
+        console.error('An error occurred at tap', error);
+      }
+      return either;
+    });
   }
 
   public tapError(fn: (error: L) => void | Promise<void>): AsyncEither<L, R> {
-    return new AsyncEither(
-      this.promise.then(async (either) => {
-        if (!either.isLeft()) return either;
-        try {
-          await fn(either.unwrapError());
-        } catch (error) {
-          console.error('An error occurred at tapError', error);
-        }
-        return either;
-      }),
-    );
+    return this.chain(async (either) => {
+      if (!either.isLeft()) return either;
+      try {
+        await fn(either.unwrapError());
+      } catch (error) {
+        console.error('An error occurred at tapError', error);
+      }
+      return either;
+    });
   }
 
   public tapBoth(
-    rightFn: ((value: R) => void | Promise<void>) | null,
-    leftFn: ((error: L) => void | Promise<void>) | null,
+    rightFn?: ((value: R) => void | Promise<void>) | null,
+    leftFn?: ((error: L) => void | Promise<void>) | null,
   ): AsyncEither<L, R> {
     return new AsyncEither(
       this.promise.then(async (either) => {
@@ -208,12 +194,21 @@ export class AsyncEither<L, R> implements Promise<Either<L, R>> {
       ? { success: true, value: either.unwrap() }
       : { success: false, error: either.unwrapError() };
   }
+
+  private chain<NextL, NextR>(
+    transform: (
+      either: Either<L, R>,
+    ) => Either<NextL, NextR> | Promise<Either<NextL, NextR>>,
+  ): AsyncEither<NextL, NextR> {
+    const newPromiseResolvingToEither = this.promise.then(transform);
+    return new AsyncEither(newPromiseResolvingToEither);
+  }
 }
 
 export const asyncRight = <L, R>(value: R): AsyncEither<L, R> => {
-  return new AsyncEither(Promise.resolve(right(value)));
+  return AsyncEither.fromEither(right(value));
 };
 
 export const asyncLeft = <L, R>(error: L): AsyncEither<L, R> => {
-  return new AsyncEither(Promise.resolve(left(error)));
+  return AsyncEither.fromEither(left(error));
 };
