@@ -2,7 +2,18 @@ import { EitherUnwrapError } from '../errors';
 import { Either } from './either';
 import type { Right } from './right';
 
+/**
+ * Represents the Left case of an Either, containing an error value.
+ *
+ * @template L The type of the Left value
+ * @template R The type of the Right value (not present in a Left)
+ */
 export class Left<L, R> extends Either<L, R> {
+  /**
+   * Creates a new Left instance with the given error.
+   *
+   * @param error The error value to store
+   */
   constructor(protected readonly error: L) {
     super();
   }
