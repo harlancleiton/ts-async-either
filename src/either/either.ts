@@ -119,6 +119,14 @@ export abstract class Either<L, R> {
   public abstract unwrapError(): L;
 
   /**
+   * Extracts the Right value or throws an error if this is a Left.
+   *
+   * @returns The Right value
+   * @throws {EitherUnwrapError} If this is a Left
+   */
+  public abstract unwrapOrThrow(): R;
+
+  /**
    * Performs a side-effect on the Right value without changing the Either.
    * If this is a Left, does nothing.
    *
