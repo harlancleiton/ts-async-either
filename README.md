@@ -1,23 +1,23 @@
-# ts-either
+# ts-async-either
 
 A TypeScript library implementing the Either monad for elegant error handling with strong type safety. It provides both synchronous and asynchronous interfaces to handle operations that might succeed or fail.
 
 ## Installation
 
 ```bash
-pnpm add ts-either
+pnpm add ts-async-either
 ```
 
 or
 
 ```bash
-yarn add ts-either
+yarn add ts-async-either
 ```
 
 or
 
 ```bash
-npm install ts-either
+npm install ts-async-either
 ```
 
 ## Core Concepts
@@ -39,7 +39,7 @@ This approach encourages:
 ### Creating Either values
 
 ```typescript
-import { Either, left, right } from 'ts-either';
+import { Either, left, right } from 'ts-async-either';
 
 // Success case
 const successResult: Either<Error, number> = right(42);
@@ -96,10 +96,13 @@ if (outcome.success) {
 ### Creating AsyncEither values
 
 ```typescript
-import { AsyncEither, asyncRight, asyncLeft } from 'ts-either';
+import { AsyncEither, asyncRight, asyncLeft, right } from 'ts-async-either';
 
-// From a Promise that might reject
-const result = AsyncEither.tryCatch<Error, Response>(fetch('/api/users/1'));
+// From a Promise that might reject. mapError turns the unknown rejection into L.
+const result = AsyncEither.tryCatch(fetch('/api/users/1'), () => new Error('Request failed'));
+
+// Legacy form: the rejection is asserted as L. Prefer mapError when you can.
+const legacy = AsyncEither.tryCatch<Error, Response>(fetch('/api/users/1'));
 
 // From a resolved value
 const success = asyncRight<Error, number>(42);
@@ -110,8 +113,8 @@ const failure = asyncLeft<string, number>('Something went wrong');
 // From an existing Either
 const fromEither = AsyncEither.fromEither(right(42));
 
-// From a raw Promise
-const fromPromise = AsyncEither.fromPromise<number>(Promise.resolve(42));
+// From a raw Promise. Type parameters are <R, L = Error>.
+const fromPromise = AsyncEither.fromPromise(Promise.resolve(42), () => new Error('failed'));
 ```
 
 ---
@@ -123,7 +126,7 @@ const fromPromise = AsyncEither.fromPromise<number>(Promise.resolve(42));
 A complete user registration flow with validation, persistence, and notification — all composed with `AsyncEither`.
 
 ```typescript
-import { AsyncEither, asyncRight, asyncLeft, left, right } from 'ts-either';
+import { AsyncEither, asyncRight, asyncLeft, left, right } from 'ts-async-either';
 
 // --- Domain types ---
 
@@ -231,8 +234,8 @@ async function handleRegistration(dto: CreateUserDTO) {
 
 - **`filter`** — validates the DTO fields inline, short-circuiting to Left on failure
 - **`flatMap`** — chains async operations that can fail (check duplicates → persist)
-- **`tap` / `tapError`** — side effects (logging, emails) without altering the pipeline
-- **`toResult`** — converts to a plain object for easy pattern matching in the controller
+- **`tap` / `tapError`** — side effects (logging, emails) without altering the pipeline. If the callback throws, the exception propagates; it is not swallowed or logged by the library
+- **`toResult`** — converts to `{ success: true; value } | { success: false; error }`
 
 ---
 
@@ -241,7 +244,7 @@ async function handleRegistration(dto: CreateUserDTO) {
 A bank withdrawal flow with balance checks, daily limit validation, and error recovery.
 
 ```typescript
-import { AsyncEither, asyncRight, asyncLeft, left, right } from 'ts-either';
+import { AsyncEither, asyncRight, asyncLeft, left, right } from 'ts-async-either';
 
 // --- Domain types ---
 
@@ -470,43 +473,62 @@ if (!result.success) {
 
 ---
 
+## Exceptions and Left values
+
+`tryCatch`, `fromPromise`, and `new AsyncEither(promise)` turn a rejection into a Left. Pass `mapError: (error: unknown) => L` so that conversion is typed. Without it, the rejection is asserted as `L` (kept so existing `tryCatch<L, R>(promise)` calls still compile).
+
+`map`, `flatMap`, `mapError`, `filter`, `recover`, `tap`, `tapError`, and `tapBoth` do not catch callback exceptions. A throw or rejection fails the pipeline. On `AsyncEither` the promise rejects. On `Either` the exception is thrown. The library does not log it.
+
+`unwrap()` on a Left throws `EitherUnwrapError`. `unwrapOrThrow()` / `orThrow()` throw or reject with the stored Left value itself.
+
 ## API Reference
 
 ### Either<L, R>
 
-| Method                                                                                          | Description                              |
-| ----------------------------------------------------------------------------------------------- | ---------------------------------------- |
-| `map<T>(fn: (value: R) => T): Either<L, T>`                                                     | Transform the right value                |
-| `mapError<T>(fn: (err: L) => T): Either<T, R>`                                                  | Transform the left value                 |
-| `flatMap<U, T>(fn: (value: R) => Either<U, T>): Either<L \| U, T>`                              | Chain operations that might fail         |
+| Method | Description |
+| --- | --- |
+| `map<T>(fn: (value: R) => T): Either<L, T>` | Transform the right value |
+| `mapError<T>(fn: (err: L) => T): Either<T, R>` | Transform the left value |
+| `flatMap<U, T>(fn: (value: R) => Either<U, T>): Either<L \| U, T>` | Chain operations that might fail |
 | `filter<E>(predicate: (value: R) => boolean, errorFactory: (value: R) => E): Either<L \| E, R>` | Convert right to left if predicate fails |
-| `getOrElse(defaultValue: R): R`                                                                 | Extract the value or return default      |
-| `getErrorOrElse(defaultError: L): L`                                                            | Extract the error or return default      |
-| `isRight(): boolean`                                                                            | Check if instance is Right               |
-| `isLeft(): boolean`                                                                             | Check if instance is Left                |
-| `unwrap(): R`                                                                                   | Extract value (throws if Left)           |
-| `unwrapError(): L`                                                                              | Extract error (throws if Right)          |
-| `unwrapOrThrow(): R`                                                                            | Extract value or throw (alias)           |
-| `tap(fn: (value: R) => void): Either<L, R>`                                                     | Side effect on success                   |
-| `tapError(fn: (error: L) => void): Either<L, R>`                                                | Side effect on error                     |
-| `tapBoth(rightFn, leftFn): Either<L, R>`                                                        | Side effect on either path               |
-| `toResult(): { success: boolean, value?: R, error?: L }`                                        | Convert to result object                 |
+| `getOrElse(defaultValue: R): R` | Extract the value or return default |
+| `getErrorOrElse(defaultError: L): L` | Extract the error or return default |
+| `isRight(): this is Right<L, R>` | Check if instance is Right, and narrow |
+| `isLeft(): this is Left<L, R>` | Check if instance is Left, and narrow |
+| `unwrap(): R` | Extract value, or throw `EitherUnwrapError` if Left |
+| `unwrapError(): L` | Extract error, or throw `EitherUnwrapError` if Right |
+| `unwrapOrThrow(): R` | Extract value, or throw the stored Left value |
+| `tap(fn: (value: R) => void): Either<L, R>` | Side effect on success. Exceptions propagate |
+| `tapError(fn: (error: L) => void): Either<L, R>` | Side effect on error. Exceptions propagate |
+| `tapBoth(rightFn: ((value: R) => void) \| null, leftFn?: ((error: L) => void) \| null): Either<L, R>` | Side effect on the active path. Exceptions propagate |
+| `toResult(): { success: true; value: R } \| { success: false; error: L }` | Convert to a discriminated result |
 
 ### AsyncEither<L, R>
 
-Inherits all Either methods (async-compatible) plus:
+`await`ing an `AsyncEither` yields `Either<L, R>`. Methods that read the value return promises. `isRight()` and `isLeft()` resolve to `boolean` and do not narrow; await the `AsyncEither` and use the synchronous guards:
 
-| Method                                                                       | Description                                  |
-| ---------------------------------------------------------------------------- | -------------------------------------------- |
-| `static tryCatch<L, R>(promise: Promise<R>): AsyncEither<L, R>`              | Create from Promise that might reject        |
-| `static fromPromise<R, L>(promise: Promise<R>): AsyncEither<L, R>`           | Create from Promise                          |
-| `static fromEither<L, R>(either: Either<L, R>): AsyncEither<L, R>`           | Create from Either                           |
-| `static all<T>(promises: AsyncEither[]): AsyncEither<L, R[]>`                | Parallel execution, fail fast on first error |
-| `static fromMany<T>(asyncEithers: AsyncEither[]): AsyncEither<L, R[]>`       | Parallel execution, collect all errors       |
-| `static allSettled<T>(promises: (AsyncEither \| Promise)[]): AsyncEither[]`  | Convert array to independent AsyncEithers    |
-| `recover<U>(fn: (err: L) => AsyncEither<L \| U, R>): AsyncEither<L \| U, R>` | Recover from a Left with a fallback          |
-| `orThrow(): Promise<R>`                                                      | Unwrap or throw (async)                      |
-| `then / catch`                                                               | Promise interface compatibility              |
+```typescript
+const either = await result;
+if (either.isRight()) {
+  either.unwrap();
+}
+```
+
+| Method | Description |
+| --- | --- |
+| `static tryCatch<L, R>(promise: Promise<R>): AsyncEither<L, R>` | Rejection is asserted as `L` |
+| `static tryCatch<L, R>(promise: Promise<R>, mapError: (error: unknown) => L): AsyncEither<L, R>` | Rejection is mapped from `unknown` to `L` |
+| `static fromPromise<R, L = Error>(promise: Promise<R>): AsyncEither<L, R>` | Same as `tryCatch`, with `<R, L>` parameter order |
+| `static fromPromise<R, L>(promise: Promise<R>, mapError: (error: unknown) => L): AsyncEither<L, R>` | `fromPromise` with a rejection mapper |
+| `static fromEither<L, R>(either: Either<L, R>): AsyncEither<L, R>` | Wrap an Either |
+| `static all(asyncEithers)` | Fail-fast. Right is a tuple of each success type. Left is the union of the error types, and is the first error |
+| `static fromMany(asyncEithers)` | Waits for every input. Right is the success tuple. One Left is that error. Multiple Lefts are `AsyncEitherSettledError` |
+| `static allSettled(inputs)` | Tuple of AsyncEithers, one per input, not combined. A Promise becomes `AsyncEither<unknown, R>` |
+| `recover<U>(fn: (err: L) => AsyncEither<L \| U, R>): AsyncEither<L \| U, R>` | Replace a Left with another AsyncEither |
+| `orThrow(): Promise<R>` / `unwrapOrThrow(): Promise<R>` | Resolve to the value, or reject with the Left value |
+| `toResult(): Promise<{ success: true; value: R } \| { success: false; error: L }>` | Discriminated result |
+| `isRight(): Promise<boolean>` / `isLeft(): Promise<boolean>` | Do not narrow. See the snippet above |
+| `then` / `catch` / `finally` | Promise interface. A Left fulfills; a callback exception rejects |
 
 ## License
 

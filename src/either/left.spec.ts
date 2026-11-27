@@ -12,10 +12,9 @@ describe('Left', () => {
 
   it('should return new Left with same error when map is called', () => {
     const error = new Error(faker.string.sample());
-    const sut = new Left(error);
+    const sut = new Left<Error, number>(error);
     const mapper = (value: number) => value * 2;
 
-    // @ts-expect-error
     const observed = sut.map(mapper);
     const expected = new Left(error);
 
@@ -50,7 +49,6 @@ describe('Left', () => {
     const sut = new Left(error);
     const mapper = () => new Left(new Error('new error'));
 
-    // @ts-expect-error
     const observed = sut.flatMap(mapper);
     const expected = new Left(error);
 
@@ -71,7 +69,6 @@ describe('Left', () => {
     const error = new Error(faker.string.sample());
     const sut = new Left(error);
 
-    // @ts-expect-error
     const observed = sut.getErrorOrElse(new Error(faker.string.sample()));
 
     expect(observed).toBe(error);
@@ -116,7 +113,7 @@ describe('Left', () => {
   it('should return self when tap is called', () => {
     const sut = new Left(faker.string.sample());
 
-    const observed = sut.tap();
+    const observed = sut.tap(() => undefined);
 
     expect(observed).toBe(sut);
   });
@@ -124,7 +121,6 @@ describe('Left', () => {
   it("shouldn't execute rightFn when tap is called", () => {
     const sut = new Left(faker.string.sample());
     const mockFn = vitest.fn();
-    // @ts-expect-error
     sut.tap(mockFn);
 
     expect(mockFn).not.toHaveBeenCalled();
@@ -140,7 +136,7 @@ describe('Left', () => {
     expect(mockFn).toHaveBeenCalledWith(error);
   });
 
-  it('should handle exceptions in tapError without throwing', () => {
+  it('should propagate exceptions from tapError', () => {
     const sut = new Left(faker.string.sample());
     const mockConsoleError = vitest
       .spyOn(console, 'error')
@@ -148,17 +144,39 @@ describe('Left', () => {
     const mockConsoleLog = vitest
       .spyOn(console, 'log')
       .mockImplementation(() => {});
-
     const error = new Error(faker.string.sample());
-    const observed = sut.tapError(() => {
-      throw error;
-    });
 
-    expect(observed).toBe(sut);
-    expect(mockConsoleError).toHaveBeenCalledWith(error);
-    expect(mockConsoleLog).toHaveBeenCalledWith(
-      '[Either/Left] Error on tapError',
-    );
+    expect(() =>
+      sut.tapError(() => {
+        throw error;
+      }),
+    ).toThrow(error);
+    expect(mockConsoleError).not.toHaveBeenCalled();
+    expect(mockConsoleLog).not.toHaveBeenCalled();
+
+    mockConsoleError.mockRestore();
+    mockConsoleLog.mockRestore();
+  });
+
+  it('should throw the stored error when unwrapOrThrow is called', () => {
+    const error = new Error(faker.string.sample());
+    const sut = new Left<Error, string>(error);
+
+    expect(() => sut.unwrapOrThrow()).toThrow(error);
+  });
+
+  it('should throw a non-Error left value from unwrapOrThrow', () => {
+    const error = faker.string.sample();
+    const sut = new Left<string, number>(error);
+
+    expect(() => sut.unwrapOrThrow()).toThrow(error);
+  });
+
+  it('should convert to an error result', () => {
+    const error = faker.string.sample();
+    const sut = new Left<string, number>(error);
+
+    expect(sut.toResult()).toEqual({ success: false, error });
   });
 
   it('should execute left function when tapBoth is called with leftFn', () => {
