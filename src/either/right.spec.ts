@@ -19,7 +19,6 @@ describe('Right', () => {
     const value = faker.string.alpha();
     const sut = new Right(value);
 
-    // @ts-expect-error
     const observed = sut.mapError(() => faker.string.alpha());
     const expected = new Right(value);
 
@@ -68,7 +67,6 @@ describe('Right', () => {
     const value = faker.string.alpha();
     const sut = new Right(value);
 
-    // @ts-expect-error
     const observed = sut.getOrElse(faker.string.alpha());
     const expected = value;
 
@@ -134,7 +132,7 @@ describe('Right', () => {
     expect(mockFn).toHaveBeenCalledWith(value);
   });
 
-  it('should handle exceptions in tap without throwing', () => {
+  it('should propagate exceptions from tap', () => {
     const sut = new Right(faker.string.sample());
     const mockConsoleError = vitest
       .spyOn(console, 'error')
@@ -142,21 +140,31 @@ describe('Right', () => {
     const mockConsoleLog = vitest
       .spyOn(console, 'log')
       .mockImplementation(() => {});
-
     const error = new Error(faker.string.sample());
-    const observed = sut.tap(() => {
-      throw error;
-    });
 
-    expect(observed).toBe(sut);
-    expect(mockConsoleError).toHaveBeenCalledWith(error);
-    expect(mockConsoleLog).toHaveBeenCalledWith('[Either/Right] Error on tap');
+    expect(() =>
+      sut.tap(() => {
+        throw error;
+      }),
+    ).toThrow(error);
+    expect(mockConsoleError).not.toHaveBeenCalled();
+    expect(mockConsoleLog).not.toHaveBeenCalled();
+
+    mockConsoleError.mockRestore();
+    mockConsoleLog.mockRestore();
+  });
+
+  it('should convert to a success result', () => {
+    const value = faker.string.alpha();
+    const sut = new Right<string, string>(value);
+
+    expect(sut.toResult()).toEqual({ success: true, value });
   });
 
   it('should return self when tapError is called', () => {
     const sut = new Right(faker.string.sample());
 
-    const observed = sut.tapError();
+    const observed = sut.tapError(() => undefined);
 
     expect(observed).toBe(sut);
   });
@@ -164,7 +172,6 @@ describe('Right', () => {
   it("shouldn't execute leftFn when tapError is called", () => {
     const sut = new Right(faker.string.sample());
     const mockFn = vitest.fn();
-    // @ts-expect-error
     sut.tapError(mockFn);
 
     expect(mockFn).not.toHaveBeenCalled();
@@ -176,7 +183,6 @@ describe('Right', () => {
     const mockLeftFn = vitest.fn();
     const mockRightFn = vitest.fn();
 
-    // @ts-expect-error
     sut.tapBoth(mockRightFn, mockLeftFn);
 
     expect(mockLeftFn).not.toHaveBeenCalled();

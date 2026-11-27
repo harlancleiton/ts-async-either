@@ -2,257 +2,287 @@ import { Either, left, right } from '../either';
 import { AsyncEitherSettledError } from '../errors';
 
 /**
+ * Promises placed here already settle to an Either.
+ * Rejections are bugs and must propagate; they must not be reified as Left.
+ */
+const passthrough = new WeakSet<object>();
+
+/**
+ * Distinguishes a fail-fast Left inside `AsyncEither.all` from a thrown bug.
+ * Promise.all only reports the rejection reason, so Left values are wrapped
+ * and then unwrapped. Anything else is rethrown.
+ */
+class FailFastLeft {
+  constructor(public readonly error: unknown) {}
+}
+
+// `any` keeps the constraint bivariant so AsyncEither<L, R> is accepted.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type AnyAsyncEither = AsyncEither<any, any>;
+
+/**
  * An asynchronous version of Either that wraps a Promise of an Either.
  * Provides a way to work with Either in asynchronous contexts.
  * Implements the Promise interface for compatibility with Promise-based APIs.
+ *
+ * Rejections of the inner promise are Left values only for `tryCatch`,
+ * `fromPromise`, and `new AsyncEither(promise)`. Exceptions thrown by
+ * `map`, `flatMap`, `mapError`, `filter`, `recover`, `tap`, `tapError`,
+ * and `tapBoth` callbacks propagate and reject the AsyncEither.
  *
  * @template L The type of the Left value (usually an error)
  * @template R The type of the Right value (usually the success value)
  */
 export class AsyncEither<L, R> implements Promise<Either<L, R>> {
-  private readonly promise: Promise<Either<L, R>>;
+  private promise: Promise<Either<L, R>>;
 
   /**
    * Creates a new AsyncEither from a Promise or an Either.
+   * A rejected promise becomes a Left. Pass `mapError` to turn the
+   * unknown rejection into `L`. Without it, the rejection is asserted as `L`.
    *
-   * @param promiseOrEither A Promise that resolves to a value, an Either, or an Either instance
+   * @param promiseOrEither A Promise that resolves to a value or an Either, or an Either
+   * @param mapError Maps a rejection to the Left type
    */
-  constructor(promiseOrEither: Promise<R | Either<L, R>> | Either<L, R>) {
+  constructor(promiseOrEither: Promise<R | Either<L, R>> | Either<L, R>);
+  constructor(
+    promiseOrEither: Promise<R | Either<L, R>> | Either<L, R>,
+    mapError: (error: unknown) => L,
+  );
+  constructor(
+    promiseOrEither: Promise<R | Either<L, R>> | Either<L, R>,
+    mapError?: (error: unknown) => L,
+  ) {
+    if (
+      mapError === undefined &&
+      typeof promiseOrEither === 'object' &&
+      promiseOrEither !== null &&
+      passthrough.has(promiseOrEither)
+    ) {
+      this.promise = promiseOrEither as Promise<Either<L, R>>;
+      return;
+    }
+
     this.promise = Promise.resolve(promiseOrEither)
       .then((result) => {
         if (result instanceof Either) return result;
         return right<L, R>(result);
       })
-      .catch((error) => left<L, R>(error as L));
+      .catch((error: unknown) =>
+        left<L, R>(mapError ? mapError(error) : (error as L)),
+      );
   }
 
   /**
-   * Creates an AsyncEither from a Promise that might throw.
-   * If the Promise resolves, the result will be a Right.
-   * If the Promise rejects, the error will be a Left.
+   * Creates an AsyncEither from a Promise that might reject.
+   * Fulfillment becomes a Right. Rejection becomes a Left.
    *
-   * @template L The type of the Left value
-   * @template R The type of the Right value
-   * @param promise A Promise that might throw
-   * @returns An AsyncEither that will resolve to Either
+   * Without `mapError`, the rejection is asserted as `L` (legacy).
+   * Pass `mapError` so `L` is produced from `unknown`.
+   *
+   * @param promise A Promise that might reject
+   * @param mapError Maps a rejection to the Left type
    */
-  public static tryCatch<L, R>(promise: Promise<R>): AsyncEither<L, R> {
-    return new AsyncEither(promise);
+  public static tryCatch<L, R>(promise: Promise<R>): AsyncEither<L, R>;
+  public static tryCatch<L, R>(
+    promise: Promise<R>,
+    mapError: (error: unknown) => L,
+  ): AsyncEither<L, R>;
+  public static tryCatch<L, R>(
+    promise: Promise<R>,
+    mapError?: (error: unknown) => L,
+  ): AsyncEither<L, R> {
+    if (mapError) return new AsyncEither(promise, mapError);
+    return new AsyncEither<L, R>(promise);
   }
 
   /**
-   * Creates an AsyncEither from a Promise with Error as the default Left type.
+   * Creates an AsyncEither from a Promise.
+   * Type parameters are `<R, L>`, with `L` defaulting to `Error`.
+   * Pass `mapError` so `L` is produced from `unknown` instead of asserted.
    *
-   * @template R The type of the Right value
-   * @template L The type of the Left value, defaults to Error
    * @param promise A Promise to wrap
-   * @returns An AsyncEither that will resolve to Either
+   * @param mapError Maps a rejection to the Left type
    */
   public static fromPromise<R, L = Error>(
     promise: Promise<R>,
+  ): AsyncEither<L, R>;
+  public static fromPromise<R, L>(
+    promise: Promise<R>,
+    mapError: (error: unknown) => L,
+  ): AsyncEither<L, R>;
+  public static fromPromise<R, L = Error>(
+    promise: Promise<R>,
+    mapError?: (error: unknown) => L,
   ): AsyncEither<L, R> {
-    return AsyncEither.tryCatch(promise);
+    if (mapError) return AsyncEither.tryCatch(promise, mapError);
+    return AsyncEither.tryCatch<L, R>(promise);
   }
 
   /**
    * Creates an AsyncEither from an Either.
    *
-   * @template L The type of the Left value
-   * @template R The type of the Right value
    * @param either An Either to wrap
-   * @returns An AsyncEither that will resolve to the given Either
    */
   public static fromEither<L, R>(either: Either<L, R>): AsyncEither<L, R> {
     return new AsyncEither(either);
   }
 
   /**
-   * Combines multiple AsyncEither instances into a single AsyncEither.
-   * If all AsyncEithers resolve to Right values, returns a Right with an array of all values.
-   * If any AsyncEither resolves to a Left, returns a Left with the first error encountered.
+   * Combines AsyncEither values in parallel and fails fast on the first Left.
+   * If every input is Right, the result is a Right of the value tuple.
+   * If any input is Left, the result is a Left of the first error.
+   * A rejection (a callback bug) propagates instead of becoming a Left.
    *
-   * @template T A tuple of AsyncEither types
-   * @param promises An array of AsyncEither instances to combine
-   * @returns An AsyncEither that resolves to either a Left with the first error, or a Right with all values
-   *
-   * @example
-   * // All succeed - returns Right with array of values
-   * const result = await AsyncEither.all([
-   *   asyncRight(1),
-   *   asyncRight(2),
-   *   asyncRight(3)
-   * ]);
-   * // result.unwrap() => [1, 2, 3]
-   *
-   * @example
-   * // One fails - returns Left with first error
-   * const result = await AsyncEither.all([
-   *   asyncRight(1),
-   *   asyncLeft('error'),
-   *   asyncRight(3)
-   * ]);
-   * // result.unwrapError() => 'error'
+   * @param promises AsyncEither instances to combine
    */
-  public static all<T extends readonly AsyncEither<any, any>[]>(
+  public static all<T extends readonly AnyAsyncEither[]>(
     promises: [...T],
   ): AsyncEither<
-    T[number] extends AsyncEither<infer L, any> ? L : never,
-    { [K in keyof T]: T[K] extends AsyncEither<any, infer R> ? R : never }
+    T[number] extends AsyncEither<infer E, infer _Ignored> ? E : never,
+    {
+      [K in keyof T]: T[K] extends AsyncEither<infer _Ignored, infer RV>
+        ? RV
+        : never;
+    }
   > {
-    // @ts-expect-error
-    return new AsyncEither(
-      Promise.all(
-        promises.map((p) =>
-          p.then((e) =>
-            e.isLeft() ? Promise.reject(e.unwrapError()) : e.unwrap(),
-          ),
-        ),
+    type Err =
+      T[number] extends AsyncEither<infer E, infer _Ignored> ? E : never;
+    type Values = {
+      [K in keyof T]: T[K] extends AsyncEither<infer _Ignored, infer RV>
+        ? RV
+        : never;
+    };
+
+    const settled = Promise.all(
+      promises.map((promise) =>
+        promise.then((either) => {
+          if (either.isLeft()) throw new FailFastLeft(either.unwrapError());
+          return either.unwrap();
+        }),
       ),
+    ).then(
+      (values) => right<Err, Values>(values as unknown as Values),
+      (reason: unknown) => {
+        if (reason instanceof FailFastLeft) {
+          return left<Err, Values>(reason.error as Err);
+        }
+        throw reason;
+      },
     );
+
+    return AsyncEither.adopt(settled);
   }
 
   /**
-   * Converts an array of AsyncEither instances or Promises into an array of AsyncEither instances.
-   * Each element is wrapped in an AsyncEither if it isn't already one.
-   * Unlike `all` or `fromMany`, this method does not combine the results - it simply ensures
-   * each element is an AsyncEither that can be processed independently.
+   * Wraps each AsyncEither or Promise as its own AsyncEither.
+   * Results are not combined: each one succeeds or fails independently.
+   * A raw Promise uses `unknown` as its Left type.
    *
-   * @template T A tuple of AsyncEither or Promise types
-   * @param promises An array of AsyncEither instances or Promises to convert
-   * @returns An array of AsyncEither instances corresponding to each input
-   *
-   * @example
-   * // Convert mixed array of AsyncEithers and Promises
-   * const [a, b, c] = AsyncEither.allSettled([
-   *   asyncRight(1),
-   *   Promise.resolve(2),
-   *   asyncLeft('error')
-   * ]);
-   * // a, b, c are all AsyncEither instances that can be awaited independently
-   *
-   * @example
-   * // Process each result independently
-   * const results = AsyncEither.allSettled([
-   *   fetchUser(1),
-   *   fetchUser(2),
-   *   fetchUser(3)
-   * ]);
-   * // Each result can succeed or fail independently
-   * for (const result of results) {
-   *   const either = await result;
-   *   if (either.isRight()) {
-   *     console.log('Success:', either.unwrap());
-   *   } else {
-   *     console.log('Failed:', either.unwrapError());
-   *   }
-   * }
+   * @param promises AsyncEither instances or Promises to wrap
    */
   public static allSettled<T extends readonly unknown[]>(
     promises: [...T],
   ): {
-    [K in keyof T]: T[K] extends AsyncEither<infer L, infer R>
-      ? AsyncEither<L, R>
-      : T[K] extends Promise<infer R>
-        ? AsyncEither<unknown, R>
+    [K in keyof T]: T[K] extends AsyncEither<infer EL, infer ER>
+      ? AsyncEither<EL, ER>
+      : T[K] extends Promise<infer PR>
+        ? AsyncEither<unknown, PR>
         : never;
   } {
-    return promises.map((p) => {
-      if (p instanceof AsyncEither) {
-        return p;
-      }
-      // @ts-expect-error
-      return new AsyncEither(p);
-    }) as any;
+    type Result = {
+      [K in keyof T]: T[K] extends AsyncEither<infer EL, infer ER>
+        ? AsyncEither<EL, ER>
+        : T[K] extends Promise<infer PR>
+          ? AsyncEither<unknown, PR>
+          : never;
+    };
+
+    // Array.map does not preserve tuple types.
+    const settled = promises.map((item) => {
+      if (item instanceof AsyncEither) return item;
+      return AsyncEither.tryCatch<unknown, unknown>(Promise.resolve(item));
+    });
+
+    return settled as unknown as Result;
   }
 
   /**
-   * Combines multiple AsyncEither instances, waiting for all to settle and collecting all results.
-   * Unlike `all` which fails fast on the first error, this method waits for all promises to complete.
-   * If all succeed, returns a Right with an array of all values.
-   * If any fail, returns a Left with either the single error or an AsyncEitherSettledError containing all errors.
+   * Waits for every AsyncEither to settle.
+   * All Right: a Right of the value tuple.
+   * One Left: that error, unwrapped.
+   * Several Lefts: an `AsyncEitherSettledError` containing each error.
+   * An empty list is a Right of `[]`.
+   * A rejection (a callback bug) propagates instead of becoming a Left.
    *
-   * @template T A tuple of AsyncEither types
-   * @param asyncEithers An array of AsyncEither instances to combine
-   * @returns An AsyncEither that resolves to either a Left with error(s), or a Right with all values
-   *
-   * @example
-   * // All succeed - returns Right with array of values
-   * const result = await AsyncEither.fromMany([
-   *   asyncRight(1),
-   *   asyncRight(2),
-   *   asyncRight(3)
-   * ]);
-   * // result.unwrap() => [1, 2, 3]
-   *
-   * @example
-   * // One fails - returns Left with the single error
-   * const result = await AsyncEither.fromMany([
-   *   asyncRight(1),
-   *   asyncLeft(new Error('error')),
-   *   asyncRight(3)
-   * ]);
-   * // result.unwrapError() => Error('error')
-   *
-   * @example
-   * // Multiple fail - returns Left with AsyncEitherSettledError containing all errors
-   * const result = await AsyncEither.fromMany([
-   *   asyncLeft(new Error('error1')),
-   *   asyncLeft(new Error('error2')),
-   *   asyncRight(3)
-   * ]);
-   * // result.unwrapError() => AsyncEitherSettledError({ errors: [Error('error1'), Error('error2')] })
-   *
-   * @example
-   * // Empty array - returns Right with empty array
-   * const result = await AsyncEither.fromMany([]);
-   * // result.unwrap() => []
+   * @param asyncEithers AsyncEither instances to combine
    */
-  public static fromMany<T extends readonly AsyncEither<any, any>[]>(
+  public static fromMany<T extends readonly AnyAsyncEither[]>(
     asyncEithers: [...T],
   ): AsyncEither<
     | AsyncEitherSettledError
-    | (T[number] extends AsyncEither<infer L, any> ? L : never),
+    | (T[number] extends AsyncEither<infer E, infer _Ignored> ? E : never),
     {
-      [K in keyof T]: T[K] extends AsyncEither<any, infer R> ? R : never;
+      [K in keyof T]: T[K] extends AsyncEither<infer _Ignored, infer RV>
+        ? RV
+        : never;
     }
   > {
-    // @ts-expect-error
-    if (asyncEithers.length === 0) return AsyncEither.fromEither(right([]));
+    type Err =
+      | AsyncEitherSettledError
+      | (T[number] extends AsyncEither<infer E, infer _Ignored> ? E : never);
+    type Values = {
+      [K in keyof T]: T[K] extends AsyncEither<infer _Ignored, infer RV>
+        ? RV
+        : never;
+    };
 
-    // @ts-expect-error
-    return new AsyncEither(
-      Promise.all(asyncEithers.map((ae) => ae.then((e) => e))).then(
-        (settledResults) => {
-          const errors: unknown[] = [];
-          const values: unknown[] = [];
+    if (asyncEithers.length === 0) {
+      return AsyncEither.fromEither(
+        right<Err, Values>([] as unknown as Values),
+      );
+    }
 
-          settledResults.forEach((result) => {
-            if (result.isLeft()) {
-              errors.push(result.unwrapError());
-            } else {
-              values.push(result.unwrap());
-            }
-          });
+    const settled = Promise.all(
+      asyncEithers.map((ae) => ae.then((e) => e)),
+    ).then((results): Either<Err, Values> => {
+      const errors: unknown[] = [];
+      const values: unknown[] = [];
 
-          if (errors.length === 0) {
-            return right(values as any);
-          }
+      results.forEach((result) => {
+        if (result.isLeft()) errors.push(result.unwrapError());
+        else values.push(result.unwrap());
+      });
 
-          // Se há apenas um erro, retorna ele diretamente
-          if (errors.length === 1) {
-            return left(errors[0]);
-          }
+      if (errors.length === 0) {
+        return right(values as unknown as Values);
+      }
 
-          return left(new AsyncEitherSettledError(errors as Error[]));
-        },
-      ),
-    );
+      if (errors.length === 1) {
+        return left(errors[0] as Err);
+      }
+
+      return left(
+        new AsyncEitherSettledError(errors as Error[]) as unknown as Err,
+      );
+    });
+
+    return AsyncEither.adopt(settled);
+  }
+
+  /**
+   * Builds an AsyncEither whose promise is used as-is.
+   * Used for chains that must not convert rejections into Left.
+   */
+  private static adopt<L, R>(
+    promise: Promise<Either<L, R>>,
+  ): AsyncEither<L, R> {
+    passthrough.add(promise);
+    return new AsyncEither<L, R>(promise as Promise<R | Either<L, R>>);
   }
 
   /**
    * Implementation of the Promise interface's Symbol.toStringTag.
-   *
-   * @returns The string tag for this object
    */
   public get [Symbol.toStringTag](): string {
     return 'AsyncEither';
@@ -260,43 +290,38 @@ export class AsyncEither<L, R> implements Promise<Either<L, R>> {
 
   /**
    * Implementation of the Promise interface's then method.
-   *
-   * @template TResult1 The type of the fulfilled value
-   * @template TResult2 The type of the rejected value
-   * @param onfulfilled The callback to execute when the Promise is resolved
-   * @param onrejected The callback to execute when the Promise is rejected
-   * @returns A Promise for the completion of which ever callback is executed
    */
   public then<TResult1 = Either<L, R>, TResult2 = never>(
     onfulfilled?:
       | ((value: Either<L, R>) => TResult1 | PromiseLike<TResult1>)
       | null,
-    onrejected?: ((reason: any) => TResult2 | PromiseLike<TResult2>) | null,
+    onrejected?: ((reason: unknown) => TResult2 | PromiseLike<TResult2>) | null,
   ): Promise<TResult1 | TResult2> {
     return this.promise.then(onfulfilled, onrejected);
   }
 
   /**
    * Implementation of the Promise interface's catch method.
-   *
-   * @template TResult The type of the value to return on rejection
-   * @param onrejected The callback to execute when the Promise is rejected
-   * @returns A Promise for the completion of the callback
    */
   public catch<TResult = never>(
-    onrejected?: ((reason: any) => TResult | PromiseLike<TResult>) | null,
+    onrejected?: ((reason: unknown) => TResult | PromiseLike<TResult>) | null,
   ): Promise<Either<L, R> | TResult> {
     return this.promise.catch(onrejected);
   }
 
   /**
-   * Transforms the Right value of this AsyncEither with a given function.
-   * If this is a Left, returns a new AsyncEither with the same error value.
-   * Supports both synchronous and asynchronous mapping functions.
+   * Implementation of the Promise interface's finally method.
+   */
+  public finally(onfinally?: (() => void) | null): Promise<Either<L, R>> {
+    return this.promise.finally(onfinally);
+  }
+
+  /**
+   * Transforms the Right value.
+   * A Left is returned unchanged and `fn` is not called.
+   * If `fn` throws or rejects, the AsyncEither rejects.
    *
-   * @template T The result type after mapping
    * @param fn A function to apply to the Right value
-   * @returns A new AsyncEither with the mapped Right value or the same Left value
    */
   public map<T>(fn: (value: R) => T | Promise<T>): AsyncEither<L, T> {
     return this.chain(async (either) => {
@@ -318,13 +343,11 @@ export class AsyncEither<L, R> implements Promise<Either<L, R>> {
 
   /**
    * Converts a Right to a Left if the predicate fails.
-   * If this is already a Left, returns a new AsyncEither with the same error.
-   * Supports both synchronous and asynchronous predicate functions.
+   * A Left is returned unchanged and `fn` is not called.
+   * If `fn` or `exceptionFactory` throws or rejects, the AsyncEither rejects.
    *
-   * @template U The new error type
-   * @param fn A boolean function to test the Right value
-   * @param exceptionFactory A function to create an error if the predicate fails
-   * @returns A new AsyncEither unchanged or converted to Left
+   * @param fn A predicate for the Right value
+   * @param exceptionFactory Creates the error when the predicate fails
    */
   public filter<U>(
     fn: (value: R) => boolean | Promise<boolean>,
@@ -342,13 +365,10 @@ export class AsyncEither<L, R> implements Promise<Either<L, R>> {
 
   /**
    * Maps the Right value and flattens the resulting Either or AsyncEither.
-   * If this is a Left, returns a new AsyncEither with the same error.
-   * Supports both synchronous and asynchronous mapping functions.
+   * A Left is returned unchanged and `fn` is not called.
+   * If `fn` throws or rejects, the AsyncEither rejects.
    *
-   * @template U The new Left type
-   * @template T The new Right type
-   * @param fn A function that returns a new Either, Promise<Either>, or AsyncEither
-   * @returns A new AsyncEither that is the result of applying and flattening
+   * @param fn A function that returns an Either, a Promise of an Either, or an AsyncEither
    */
   public flatMap<U, T>(
     fn: (value: R) => Either<U, T> | Promise<Either<U, T>> | AsyncEither<U, T>,
@@ -356,22 +376,17 @@ export class AsyncEither<L, R> implements Promise<Either<L, R>> {
     return this.chain(async (either) => {
       if (either.isLeft()) return left<L | U, T>(either.unwrapError());
 
-      const result = await fn(either.unwrap());
-      if (result instanceof AsyncEither) {
-        return result.promise;
-      }
-      return result;
+      // An async return unwraps Either, Promise<Either>, and AsyncEither.
+      return fn(either.unwrap());
     });
   }
 
   /**
-   * Transforms the Left value of this AsyncEither with a given function.
-   * If this is a Right, returns a new AsyncEither with the same value.
-   * Supports both synchronous and asynchronous mapping functions.
+   * Transforms the Left value.
+   * A Right is returned unchanged and `fn` is not called.
+   * If `fn` throws or rejects, the AsyncEither rejects.
    *
-   * @template U The new error type
    * @param fn A function to apply to the Left value
-   * @returns A new AsyncEither with the mapped Left value or the same Right value
    */
   public mapError<U>(fn: (error: L) => U | Promise<U>): AsyncEither<U, R> {
     return this.chain(async (either) => {
@@ -382,12 +397,11 @@ export class AsyncEither<L, R> implements Promise<Either<L, R>> {
   }
 
   /**
-   * Attempts to recover from a Left by applying a function that returns a new AsyncEither.
-   * If this is a Right, returns a new AsyncEither with the same value.
+   * Recovers from a Left by replacing it with another AsyncEither.
+   * A Right is returned unchanged and `fn` is not called.
+   * If `fn` throws or rejects, the AsyncEither rejects.
    *
-   * @template U The new error type to potentially add
-   * @param fn A function that takes a Left Either and returns a new AsyncEither
-   * @returns A new AsyncEither that might have recovered from the Left
+   * @param fn A function that receives the Left value and returns an AsyncEither
    */
   public recover<U>(
     fn: (err: L) => AsyncEither<L | U, R>,
@@ -395,20 +409,16 @@ export class AsyncEither<L, R> implements Promise<Either<L, R>> {
     return this.chain(async (either) => {
       if (either.isRight()) return right<L | U, R>(either.unwrap());
 
-      const result = await fn(either.unwrapError());
-      if (result instanceof AsyncEither) {
-        return result.promise;
-      }
-      return result;
+      return fn(either.unwrapError());
     });
   }
 
   /**
-   * Extracts the Right value or returns the provided default value if this is a Left.
-   * Supports both synchronous and asynchronous default value functions.
+   * Extracts the Right value, or the default when this is a Left.
+   * The default may be a value or a function (sync or async).
+   * If the function throws or rejects, this promise rejects.
    *
-   * @param defaultValue The default value to return if this is a Left, or a function that returns it
-   * @returns A Promise that resolves to the Right value or the default value
+   * @param defaultValue The fallback value, or a function that produces it
    */
   public async getOrElse(defaultValue: R | (() => Promise<R> | R)): Promise<R> {
     const either = await this.promise;
@@ -419,11 +429,11 @@ export class AsyncEither<L, R> implements Promise<Either<L, R>> {
   }
 
   /**
-   * Extracts the Left value or returns the provided default error if this is a Right.
-   * Supports both synchronous and asynchronous default error functions.
+   * Extracts the Left value, or the default when this is a Right.
+   * The default may be a value or a function (sync or async).
+   * If the function throws or rejects, this promise rejects.
    *
-   * @param defaultError The default error to return if this is a Right, or a function that returns it
-   * @returns A Promise that resolves to the Left value or the default error
+   * @param defaultError The fallback error, or a function that produces it
    */
   public async getErrorOrElse(
     defaultError: L | (() => Promise<L> | L),
@@ -436,85 +446,68 @@ export class AsyncEither<L, R> implements Promise<Either<L, R>> {
   }
 
   /**
-   * Performs a side-effect on the Right value without changing the AsyncEither.
-   * If this is a Left, does nothing.
-   * Supports both synchronous and asynchronous side-effect functions.
+   * Performs a side effect on the Right value.
+   * A Left skips `fn`. The AsyncEither's value is unchanged when `fn` succeeds.
+   * If `fn` throws or rejects, the AsyncEither rejects. Nothing is logged.
    *
    * @param fn A function to execute on the Right value
-   * @returns This AsyncEither unchanged
    */
   public tap(fn: (value: R) => void | Promise<void>): AsyncEither<L, R> {
     return this.chain(async (either) => {
       if (!either.isRight()) return either;
-      try {
-        await fn(either.unwrap());
-      } catch (error) {
-        console.error('An error occurred at tap', error);
-      }
+      await fn(either.unwrap());
       return either;
     });
   }
 
   /**
-   * Performs a side-effect on the Left value without changing the AsyncEither.
-   * If this is a Right, does nothing.
-   * Supports both synchronous and asynchronous side-effect functions.
+   * Performs a side effect on the Left value.
+   * A Right skips `fn`. The AsyncEither's error is unchanged when `fn` succeeds.
+   * If `fn` throws or rejects, the AsyncEither rejects. Nothing is logged.
    *
    * @param fn A function to execute on the Left value
-   * @returns This AsyncEither unchanged
    */
   public tapError(fn: (error: L) => void | Promise<void>): AsyncEither<L, R> {
     return this.chain(async (either) => {
       if (!either.isLeft()) return either;
-      try {
-        await fn(either.unwrapError());
-      } catch (error) {
-        console.error('An error occurred at tapError', error);
-      }
+      await fn(either.unwrapError());
       return either;
     });
   }
 
   /**
-   * Performs a side-effect on either the Right or Left value without changing the AsyncEither.
-   * Supports both synchronous and asynchronous side-effect functions.
+   * Performs a side effect on the active side.
+   * If the callback throws or rejects, the AsyncEither rejects. Nothing is logged.
    *
-   * @param rightFn A function to execute on the Right value
-   * @param leftFn A function to execute on the Left value
-   * @returns This AsyncEither unchanged
+   * @param rightFn Called with the Right value, or null to skip
+   * @param leftFn Called with the Left value, or null to skip
    */
   public tapBoth(
     rightFn?: ((value: R) => void | Promise<void>) | null,
     leftFn?: ((error: L) => void | Promise<void>) | null,
   ): AsyncEither<L, R> {
-    return new AsyncEither(
-      this.promise.then(async (either) => {
-        if (either.isRight() && !!rightFn) {
-          await this.tap(rightFn);
-        } else if (either.isLeft() && !!leftFn) {
-          await this.tapError(leftFn);
-        }
+    return this.chain(async (either) => {
+      if (either.isRight() && rightFn) {
+        await this.tap(rightFn);
+      } else if (either.isLeft() && leftFn) {
+        await this.tapError(leftFn);
+      }
 
-        return either;
-      }),
-    );
+      return either;
+    });
   }
 
   /**
-   * Extracts the Right value or throws an error if this is a Left.
-   *
-   * @returns The Right value
-   * @throws {EitherUnwrapError} If this is a Left
+   * Extracts the Right value or rejects with the Left value.
    */
   public async orThrow(): Promise<R> {
     return this.unwrapOrThrow();
   }
 
   /**
-   * Extracts the Right value or throws an error if this is a Left.
-   *
-   * @returns The Right value
-   * @throws {EitherUnwrapError} If this is a Left
+   * Extracts the Right value or rejects with the Left value.
+   * This is different from awaiting and calling `unwrap`, which throws
+   * `EitherUnwrapError`.
    */
   public async unwrapOrThrow(): Promise<R> {
     const either = await this.promise;
@@ -522,9 +515,9 @@ export class AsyncEither<L, R> implements Promise<Either<L, R>> {
   }
 
   /**
-   * Checks if this AsyncEither will resolve to a Right.
-   *
-   * @returns A Promise that resolves to true if this is a Right, false otherwise
+   * Resolves to whether this AsyncEither is a Right.
+   * The boolean does not narrow. Await this AsyncEither and use
+   * `Either.isRight` when the type needs to narrow.
    */
   public async isRight(): Promise<boolean> {
     const either = await this.promise;
@@ -532,9 +525,9 @@ export class AsyncEither<L, R> implements Promise<Either<L, R>> {
   }
 
   /**
-   * Checks if this AsyncEither will resolve to a Left.
-   *
-   * @returns A Promise that resolves to true if this is a Left, false otherwise
+   * Resolves to whether this AsyncEither is a Left.
+   * The boolean does not narrow. Await this AsyncEither and use
+   * `Either.isLeft` when the type needs to narrow.
    */
   public async isLeft(): Promise<boolean> {
     const either = await this.promise;
@@ -542,9 +535,7 @@ export class AsyncEither<L, R> implements Promise<Either<L, R>> {
   }
 
   /**
-   * Converts this AsyncEither to a result object.
-   *
-   * @returns A Promise that resolves to an object with a success flag and either a value or an error
+   * Converts this AsyncEither to a discriminated result object.
    */
   public async toResult(): Promise<
     { success: true; value: R } | { success: false; error: L }
@@ -554,31 +545,21 @@ export class AsyncEither<L, R> implements Promise<Either<L, R>> {
   }
 
   /**
-   * Internal method to chain transformations on this AsyncEither.
-   *
-   * @template NextL The new Left type
-   * @template NextR The new Right type
-   * @param transform A function that transforms an Either to another Either or Promise<Either>
-   * @returns A new AsyncEither with the transformed value
-   * @private
+   * Chains a transformation. Callback exceptions reject the result.
    */
   private chain<NextL, NextR>(
     transform: (
       either: Either<L, R>,
     ) => Either<NextL, NextR> | Promise<Either<NextL, NextR>>,
   ): AsyncEither<NextL, NextR> {
-    const newPromiseResolvingToEither = this.promise.then(transform);
-    return new AsyncEither(newPromiseResolvingToEither);
+    return AsyncEither.adopt(this.promise.then(transform));
   }
 }
 
 /**
  * Creates a new AsyncEither with a Right value.
  *
- * @template L The type of the Left value
- * @template R The type of the Right value
  * @param value The value to wrap in a Right
- * @returns A new AsyncEither containing a Right with the given value
  */
 export const asyncRight = <L, R>(value: R): AsyncEither<L, R> => {
   return AsyncEither.fromEither(right(value));
@@ -587,10 +568,7 @@ export const asyncRight = <L, R>(value: R): AsyncEither<L, R> => {
 /**
  * Creates a new AsyncEither with a Left value.
  *
- * @template L The type of the Left value
- * @template R The type of the Right value
  * @param error The error to wrap in a Left
- * @returns A new AsyncEither containing a Left with the given error
  */
 export const asyncLeft = <L, R>(error: L): AsyncEither<L, R> => {
   return AsyncEither.fromEither(left(error));

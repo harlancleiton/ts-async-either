@@ -119,16 +119,18 @@ export abstract class Either<L, R> {
   public abstract unwrapError(): L;
 
   /**
-   * Extracts the Right value or throws an error if this is a Left.
+   * Extracts the Right value or throws the stored Left value.
+   * This is different from `unwrap`, which throws `EitherUnwrapError`.
    *
    * @returns The Right value
-   * @throws {EitherUnwrapError} If this is a Left
+   * @throws The Left value, when this is a Left
    */
   public abstract unwrapOrThrow(): R;
 
   /**
    * Performs a side-effect on the Right value without changing the Either.
-   * If this is a Left, does nothing.
+   * If this is a Left, the function is not called.
+   * Exceptions thrown by `fn` propagate to the caller.
    *
    * @param fn A function to execute on the Right value
    * @returns This Either unchanged
@@ -137,7 +139,8 @@ export abstract class Either<L, R> {
 
   /**
    * Performs a side-effect on the Left value without changing the Either.
-   * If this is a Right, does nothing.
+   * If this is a Right, the function is not called.
+   * Exceptions thrown by `fn` propagate to the caller.
    *
    * @param fn A function to execute on the Left value
    * @returns This Either unchanged
@@ -146,14 +149,15 @@ export abstract class Either<L, R> {
 
   /**
    * Performs a side-effect on either the Right or Left value without changing the Either.
+   * Exceptions thrown by the callback that runs propagate to the caller.
    *
-   * @param rightFn A function to execute on the Right value
-   * @param leftFn A function to execute on the Left value
+   * @param rightFn A function to execute on the Right value, or null to skip it
+   * @param leftFn A function to execute on the Left value, or null to skip it
    * @returns This Either unchanged
    */
   public abstract tapBoth(
-    rightFn: (value: R) => void | null,
-    leftFn: (error: L) => void | null,
+    rightFn: ((value: R) => void) | null,
+    leftFn?: ((error: L) => void) | null,
   ): Either<L, R>;
 
   /**

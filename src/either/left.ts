@@ -18,7 +18,7 @@ export class Left<L, R> extends Either<L, R> {
     super();
   }
 
-  public map<T>(): Either<L, T> {
+  public map<T>(_mapper: (value: R) => T): Either<L, T> {
     return new Left(this.error);
   }
 
@@ -36,11 +36,14 @@ export class Left<L, R> extends Either<L, R> {
     errorFactory: (value: R) => E,
   ): Either<L | E, R>;
 
-  public filter<E, S extends R>(): Either<L | E, R | S> {
+  public filter<E, S extends R>(
+    _predicate: ((value: R) => value is S) | ((value: R) => boolean),
+    _errorFactory: (value: R) => E,
+  ): Either<L | E, R | S> {
     return new Left(this.error);
   }
 
-  public flatMap<U, T>(): Either<U | L, T> {
+  public flatMap<U, T>(_mapper: (value: R) => Either<U, T>): Either<U | L, T> {
     return new Left<U | L, T>(this.error);
   }
 
@@ -48,7 +51,7 @@ export class Left<L, R> extends Either<L, R> {
     return defaultValue;
   }
 
-  public getErrorOrElse(): L {
+  public getErrorOrElse(_defaultError: L): L {
     return this.error;
   }
 
@@ -68,24 +71,28 @@ export class Left<L, R> extends Either<L, R> {
     return this.error;
   }
 
-  public tap(): Either<L, R> {
+  /**
+   * Throws the stored Left value.
+   * `unwrap` throws `EitherUnwrapError` instead of the stored value.
+   *
+   * @throws The Left value
+   */
+  public unwrapOrThrow(): R {
+    throw this.error;
+  }
+
+  public tap(_fn: (value: R) => void): Either<L, R> {
     return this;
   }
 
   public tapError(fn: (error: L) => void): Either<L, R> {
-    try {
-      fn(this.error);
-    } catch (error) {
-      console.log('[Either/Left] Error on tapError');
-      console.error(error);
-    }
-
+    fn(this.error);
     return this;
   }
 
   public tapBoth(
-    rightFn: ((value: R) => void) | null,
-    leftFn: ((error: L) => void) | null,
+    _rightFn: ((value: R) => void) | null,
+    leftFn?: ((error: L) => void) | null,
   ): Either<L, R> {
     if (leftFn) return this.tapError(leftFn);
     return this;

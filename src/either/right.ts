@@ -22,7 +22,7 @@ export class Right<L, R> extends Either<L, R> {
     return new Right(mapper(this.value));
   }
 
-  public mapError<T>(): Either<T, R> {
+  public mapError<T>(_fn: (err: L) => T): Either<T, R> {
     return new Right(this.value);
   }
 
@@ -49,7 +49,7 @@ export class Right<L, R> extends Either<L, R> {
     return mapper(this.value);
   }
 
-  public getOrElse(): R {
+  public getOrElse(_defaultValue: R): R {
     return this.value;
   }
 
@@ -78,21 +78,18 @@ export class Right<L, R> extends Either<L, R> {
   }
 
   public tap(fn: (value: R) => void): Either<L, R> {
-    try {
-      fn(this.value);
-    } catch (error) {
-      console.log('[Either/Right] Error on tap');
-      console.error(error);
-    }
-
+    fn(this.value);
     return this;
   }
 
-  public tapError(): Either<L, R> {
+  public tapError(_fn: (error: L) => void): Either<L, R> {
     return this;
   }
 
-  public tapBoth(rightFn: ((value: R) => void) | null): Either<L, R> {
+  public tapBoth(
+    rightFn: ((value: R) => void) | null,
+    _leftFn?: ((error: L) => void) | null,
+  ): Either<L, R> {
     if (rightFn) return this.tap(rightFn);
     return this;
   }
